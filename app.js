@@ -1,4 +1,5 @@
 const $ = (id) => document.getElementById(id);
+const CODE_EXTS = [".js", ".ts", ".jsx", ".tsx", ".py", ".rb", ".java", ".go", ".c", ".cpp", ".cs", ".php", ".swift", ".rs"];
 const LEVEL_TITLE = { 1: "Wisp", 2: "Little ghost", 3: "Haunting", 4: "Specter", 5: "Phantom" };
 const URGENCY = { 1: "Whenever", 2: "Tidy up", 3: "Plan it", 4: "Fix soon", 5: "Fix today" };
 const SIZE = { 1: 62, 2: 70, 3: 80, 4: 92, 5: 106 };
@@ -104,25 +105,54 @@ function scanContent(path, content) {
 }
 
 async function processRepository(owner, repo) {
-  const url = `https://corsproxy.io/?https://api.github.com/repos/${owner}/${repo}/zipball`;
   $("busy").hidden = false;
-  $("busy-text").textContent = "Fetching repository archive...";
+  $("busy-text").textContent = "Fetching repository info...";
+  $("error").hidden = true;
   
   try {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error("Repository not found or rate limited.");
-    const blob = await response.blob();
-    $("busy-text").textContent = "Parsing contents...";
+    // 1. Get the default branch
+    let res = await fetch(`https://api.github.com/repos/${owner}/${repo}`);
+    if (!res.ok) throw new Error("Repository not found or API rate limited (60 requests/hr).");
+    let repoData = await res.json();
+    let branch = repoData.default_branch;
+
+    $("busy-text").textContent = "Fetching file tree...";
     
-    const zip = await JSZip.loadAsync(blob);
+    // 2. Get the full file tree
+    res = await fetch(`https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`);
+    if (!res.ok) throw new Error("Failed to fetch repository tree.");
+    let treeData = await res.json();
+    
+    // 3. Filter out directories and ignored files
+    let files = treeData.tree.filter(f => {
+      const isBlob = f.type === 'blob';
+      const isIgnoredDir = IGNORE_DIRS.some(d => f.path.includes(`${d}/`) || f.path.startsWith(`${d}/`));
+      const isCodeFile = CODE_EXTS.some(ext => f.path.toLowerCase().endsWith(ext));
+      
+      return isBlob && !isIgnoredDir && isCodeFile && !f.path.endsWith('.min.js');
+    });
+
+    $("busy-text").textContent = `Scanning ${files.length} files... (this may take a moment)`;
+    
     let allFindings = [];
     let fileCount = 0;
 
-    for (const [path, file] of Object.entries(zip.files)) {
-      if (file.dir || IGNORE_DIRS.some(d => path.includes(`/${d}/`)) || path.endsWith('.min.js')) continue;
-      const content = await file.async("string");
-      allFindings.push(...scanContent(path, content));
-      fileCount++;
+    // 4. Fetch raw file contents in small batches to avoid browser stalling
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < files.length; i += BATCH_SIZE) {
+      const batch = files.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (file) => {
+        try {
+          let contentRes = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${file.path}`);
+          if (contentRes.ok) {
+            let content = await contentRes.text();
+            allFindings.push(...scanContent(file.path, content));
+            fileCount++;
+          }
+        } catch (e) {
+          console.warn("Skipped file due to fetch error:", file.path);
+        }
+      }));
     }
 
     allFindings.sort((a, b) => b.level - a.level);
