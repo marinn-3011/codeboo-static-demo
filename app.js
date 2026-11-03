@@ -104,7 +104,7 @@ function scanContent(path, content) {
 }
 
 async function processRepository(owner, repo) {
-  const url = `https://api.github.com/repos/${owner}/${repo}/zipball`;
+  const url = `https://corsproxy.io/?https://api.github.com/repos/${owner}/${repo}/zipball`;
   $("busy").hidden = false;
   $("busy-text").textContent = "Fetching repository archive...";
   
