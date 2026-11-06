@@ -1077,27 +1077,160 @@ function renderList() {
   $("list-wrap").hidden = false;
 }
 
-function buildWebs() {
-  const spider = (s) => `<g class="spider"><path d="M${40 * s} -90V30" stroke="#cfe0ff" stroke-width=".6"/><path d="M${35 * s} 34l${-8 * s} -5M${35 * s} 37l${-9 * s} 1M${45 * s} 34l${8 * s} -5M${45 * s} 37l${9 * s} 1" stroke="#9db6dc" stroke-width="1"/><circle cx="${40 * s}" cy="36" r="5" fill="#1b2a4d" stroke="#9db6dc" stroke-width=".6"/></g>`;
-  const strands = (s) => {   // irregular spokes and sagging rings, different every time; s = -1 mirrors the web for the right corner
-    const P = (r, t) => [s * r * Math.cos(t), r * Math.sin(t)].map((n) => n.toFixed(1)).join(" ");
-    const R = 170, A = [0, 1, 2, 3, 4, 5].map((i) => (i * Math.PI) / 10 + (i % 5 ? (Math.random() - 0.5) * 0.09 : 0));
-    let h = A.map((t, i) => `<path class="sp" pathLength="1" style="--i:${i}" d="M0 0L${P(R * (0.96 + Math.random() * 0.06), t)}"/>`).join("");
-    for (let r = 1; r <= 6; r++) {
-      let d = `M${P(((R * r) / 6) * (0.94 + Math.random() * 0.08), A[0])}`;
-      for (let i = 0; i < 5; i++) { const rr = ((R * r) / 6) * (0.94 + Math.random() * 0.08); d += `Q${P(rr * (0.72 + Math.random() * 0.12), (A[i] + A[i + 1]) / 2)} ${P(rr, A[i + 1])}`; }
-      h += `<path class="rg" pathLength="1" data-r="${r}" style="--r:${r}" d="${d}"/>`;
+// ======================================================================
+//  Cobwebs: every knot is a little spring. Hovering, touching and scrolling push on them, they wobble and settle.
+//  The CSS idle breeze and the grow-in animation still run on top of this.
+// ======================================================================
+const WEB_R = 170, WEB_H = 190, WEB_RINGS = 6, WEB_SPOKES = 6;
+// a web as numbers: knots on spokes and rings, plus a sag control point between neighbouring knots on each ring
+function makeWebModel(s, rnd) {
+  const R = WEB_R, P = (r, t) => [s * r * Math.cos(t), r * Math.sin(t)];
+  const A = [0, 1, 2, 3, 4, 5].map((i) => (i * Math.PI) / 10 + (i % 5 ? (rnd() - 0.5) * 0.09 : 0));
+  const pt = (x, y, k, rad, w) => ({ rx: x, ry: y, dx: 0, dy: 0, vx: 0, vy: 0, k, rad, nb: [], w });
+  const nodes = [], ctrl = [], all = [];
+  for (let r = 1; r <= WEB_RINGS; r++) {
+    nodes[r] = []; ctrl[r] = [];
+    for (let i = 0; i < WEB_SPOKES; i++) {
+      const rr = ((R * r) / WEB_RINGS) * (r === WEB_RINGS ? 0.97 + rnd() * 0.05 : 0.94 + rnd() * 0.08), [x, y] = P(rr, A[i]);
+      nodes[r][i] = pt(x, y, 46 - r * 3.5, r / WEB_RINGS, 1); all.push(nodes[r][i]);
     }
-    return h + spider(s);
+    for (let i = 0; i < WEB_SPOKES - 1; i++) {
+      const a = nodes[r][i], b = nodes[r][i + 1], rr = (Math.hypot(a.rx, a.ry) + Math.hypot(b.rx, b.ry)) / 2 * (0.72 + rnd() * 0.12), [x, y] = P(rr, (A[i] + A[i + 1]) / 2);
+      ctrl[r][i] = pt(x, y, 30, r / WEB_RINGS, 0.6); all.push(ctrl[r][i]);
+    }
+  }
+  // neighbours: along a spoke, along a ring; the innermost knots are tied to the fixed corner (null = pinned)
+  for (let r = 1; r <= WEB_RINGS; r++) {
+    for (let i = 0; i < WEB_SPOKES; i++) {
+      const n = nodes[r][i];
+      n.nb.push(r > 1 ? nodes[r - 1][i] : null);
+      if (r < WEB_RINGS) n.nb.push(nodes[r + 1][i]);
+      if (i > 0) n.nb.push(nodes[r][i - 1]);
+      if (i < WEB_SPOKES - 1) n.nb.push(nodes[r][i + 1]);
+    }
+    for (let i = 0; i < WEB_SPOKES - 1; i++) ctrl[r][i].nb.push(nodes[r][i], nodes[r][i + 1]);
+  }
+  const f = (n) => n.toFixed(1);
+  const pos = (p) => f(p.rx + p.dx) + " " + f(p.ry + p.dy);
+  return {
+    s, A, nodes, ctrl, all, ang: 0, angv: 0, pivotX: 40 * s,
+    spoke(i) { let d = "M0 0"; for (let r = 1; r <= WEB_RINGS; r++) d += "L" + pos(nodes[r][i]); return d; },
+    ring(r) { let d = "M" + pos(nodes[r][0]); for (let i = 0; i < WEB_SPOKES - 1; i++) d += "Q" + pos(ctrl[r][i]) + " " + pos(nodes[r][i + 1]); return d; },
+    // advance the springs; returns how much motion is left (0 means it has settled)
+    step(dt) {
+      let e = 0;
+      for (const p of all) {
+        let sx = 0, sy = 0;
+        for (const q of p.nb) { if (q) { sx += q.dx; sy += q.dy; } }
+        const n = p.nb.length || 1, cx = (sx / n - p.dx) * 26, cy = (sy / n - p.dy) * 26;
+        p.vx += (-p.k * p.dx - 4.6 * p.vx + cx) * dt; p.vy += (-p.k * p.dy - 4.6 * p.vy + cy) * dt;
+        p.dx += p.vx * dt; p.dy += p.vy * dt;
+        e += Math.abs(p.vx) + Math.abs(p.vy) + Math.abs(p.dx) + Math.abs(p.dy);
+      }
+      this.angv += (-18 * this.ang - 1.5 * this.angv) * dt; this.ang += this.angv * dt;
+      e += Math.abs(this.angv) * 0.2 + Math.abs(this.ang) * 0.2;
+      return e;
+    },
+    // finger or mouse at (x, y) in web units, moved by (mx, my) units; also pokes the spider
+    touch(x, y, mx, my, radius, push) {
+      for (const p of all) {
+        const px = p.rx + p.dx, py = p.ry + p.dy, ddx = px - x, ddy = py - y, d = Math.hypot(ddx, ddy);
+        if (d >= radius) continue;
+        const k = (1 - d / radius) ** 2 * p.w, inv = d > 0.001 ? 1 / d : 0;
+        p.vx += (mx * 7 + ddx * inv * push) * k; p.vy += (my * 7 + ddy * inv * push) * k;
+        p.vx = Math.max(-140, Math.min(140, p.vx)); p.vy = Math.max(-140, Math.min(140, p.vy));
+      }
+      const sd = Math.hypot(x - 40 * this.s, y - 40);
+      if (sd < radius * 1.3) this.angv += (-mx * 2.5 - (x - 40 * this.s) * 0.03 * push) * (1 - sd / (radius * 1.3));
+    },
+    // the page slides by dy pixels: the threads trail behind and billow into the screen, the spider swings
+    scroll(dy) {
+      dy = Math.max(-80, Math.min(80, dy));
+      for (const p of all) {
+        p.vy += -dy * 0.2 * p.rad * p.rad; p.vx += this.s * Math.abs(dy) * 0.06 * p.rad;
+        p.vx = Math.max(-90, Math.min(90, p.vx)); p.vy = Math.max(-90, Math.min(90, p.vy));
+      }
+      this.angv = Math.max(-90, Math.min(90, this.angv - this.s * Math.abs(dy) * 0.1 + dy * 0.03));
+    },
   };
-  const web = (cls, s) => `<div class="web ${cls}"><div class="fl"><svg viewBox="${s < 0 ? -170 : 0} 0 170 190">${strands(s)}</svg></div></div>`;
-  $("webs").innerHTML = web("tl", 1) + web("tr", -1);
+}
+
+let webModels = [];
+function buildWebs() {
+  const spider = (s) => `<g class="sw"><g class="spider"><path d="M${40 * s} -90V30" stroke="#cfe0ff" stroke-width=".6"/><path d="M${35 * s} 34l${-8 * s} -5M${35 * s} 37l${-9 * s} 1M${45 * s} 34l${8 * s} -5M${45 * s} 37l${9 * s} 1" stroke="#9db6dc" stroke-width="1"/><circle cx="${40 * s}" cy="36" r="5" fill="#1b2a4d" stroke="#9db6dc" stroke-width=".6"/></g></g>`;
+  webModels = [makeWebModel(1, Math.random), makeWebModel(-1, Math.random)];
+  const web = (cls, m) => {
+    const sp = m.A.map((t, i) => `<path class="sp" pathLength="1" style="--i:${i}" d="${m.spoke(i)}"/>`).join("");
+    let rg = "";
+    for (let r = 1; r <= WEB_RINGS; r++) rg += `<path class="rg" pathLength="1" data-r="${r}" style="--r:${r}" d="${m.ring(r)}"/>`;
+    return `<div class="web ${cls}"><div class="fl"><svg viewBox="${m.s < 0 ? -WEB_R : 0} 0 ${WEB_R} ${WEB_H}">${sp}${rg}${spider(m.s)}</svg></div></div>`;
+  };
+  $("webs").innerHTML = web("tl", webModels[0]) + web("tr", webModels[1]);
+  const els = $("webs").querySelectorAll(".web");
+  webModels.forEach((m, k) => { const w = els[k]; m.svg = w.querySelector("svg"); m.sp = w.querySelectorAll(".sp"); m.rg = w.querySelectorAll(".rg"); m.sw = w.querySelector(".sw"); });
+}
+function drawWebs() {
+  for (const m of webModels) {
+    if (!m.svg) continue;
+    m.sp.forEach((el, i) => el.setAttribute("d", m.spoke(i)));
+    m.rg.forEach((el, i) => el.setAttribute("d", m.ring(i + 1)));
+    m.sw.setAttribute("transform", `rotate(${m.ang.toFixed(2)} ${m.pivotX} -90)`);
+  }
+}
+let webRaf = 0, webPrev = 0;
+function webTick(t) {
+  const dt = Math.min((t - webPrev) / 1000, 1 / 30);
+  webPrev = t;
+  let e = 0;
+  for (const m of webModels) e += m.step(dt);
+  drawWebs();
+  webRaf = e > 0.4 && !document.hidden ? requestAnimationFrame(webTick) : 0;
+}
+function webWake() { if (!webRaf && webModels.length) { webPrev = performance.now(); webRaf = requestAnimationFrame(webTick); } }
+// finger or mouse position (screen px) -> web units, for every web
+function webTouch(cx, cy, mx, my, push) {
+  for (const m of webModels) {
+    if (!m.svg) continue;
+    const r = m.svg.getBoundingClientRect();
+    if (!r.width) continue;
+    const u = WEB_R / r.width;
+    m.touch((m.s < 0 ? -WEB_R : 0) + (cx - r.left) * u, (cy - r.top) * u, Math.max(-60, Math.min(60, mx)) * u, Math.max(-60, Math.min(60, my)) * u, 64 * u, push);
+  }
+  webWake();
+}
+function initWebReactions() {
+  if (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  let mouse = null, finger = null, lastY = window.scrollY || 0;
+  window.addEventListener("pointermove", (e) => {
+    if (e.pointerType === "touch") return;   // fingers are handled by the touch events below, which keep firing while the page slides
+    if (mouse) webTouch(e.clientX, e.clientY, e.clientX - mouse[0], e.clientY - mouse[1], 4);
+    mouse = [e.clientX, e.clientY];
+  }, { passive: true });
+  document.addEventListener("mouseleave", () => { mouse = null; });
+  window.addEventListener("touchstart", (e) => {
+    const t = e.touches[0];
+    finger = [t.clientX, t.clientY];
+    webTouch(t.clientX, t.clientY, 0, 0, 24);   // a tap pokes the web outward
+  }, { passive: true });
+  window.addEventListener("touchmove", (e) => {
+    const t = e.touches[0];
+    if (finger) webTouch(t.clientX, t.clientY, t.clientX - finger[0], t.clientY - finger[1], 4);
+    finger = [t.clientX, t.clientY];
+  }, { passive: true });
+  window.addEventListener("touchend", () => { finger = null; }, { passive: true });
+  window.addEventListener("touchcancel", () => { finger = null; }, { passive: true });
+  window.addEventListener("scroll", () => {
+    const y = window.scrollY || 0, dy = y - lastY;
+    lastY = y;
+    if (!dy) return;
+    for (const m of webModels) m.scroll(dy);
+    webWake();
+  }, { passive: true });
 }
 function growWebs(w) {   // the web itself is sized by --web in CSS; this only toggles the spider
   $("webs").classList.toggle("on", w > 0);
 }
-try { buildWebs(); } catch (e) {}
-
+try { buildWebs(); initWebReactions(); } catch (e) {}
 function startHunt() {
   const src = $("source").value.trim();
   const m = src.match(/github\.com\/([^/\s]+)\/([^/\s?#]+)(?:\/tree\/([^?#\s]+))?/) || src.match(/^([\w.-]+)\/([\w.-]+)$/);
