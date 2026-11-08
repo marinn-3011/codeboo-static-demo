@@ -682,12 +682,20 @@ function chkC(c, add) {
   const L = c.clines;
   let m, k = 0;
   const alloc = /(\w+)\s*=\s*(?:\([^)]*\)\s*)?(?:malloc|calloc)\s*\(/g;
+  const NUL = "(?:NULL|nullptr|0|\\(\\s*void\\s*\\*\\s*\\)\\s*0)";
   while ((m = alloc.exec(c.code)) && k < 3) {
-    const name = m[1], ln = lineOf(c.starts, m.index), after = L.slice(ln, ln + 6).join("\n"), n = reEsc(name);
-    const use = new RegExp("\\*\\s*" + n + "\\b|\\b" + n + "\\s*(?:->|\\[)|\\b(?:memcpy|memset|strcpy|strncpy|strcat|sprintf|snprintf|fread|fgets|read|memmove)\\s*\\(\\s*" + n + "\\b").exec(after);
+    const name = m[1], n = reEsc(name), open = m.index + m[0].length - 1, close = c.br.pair[open];
+    if (close < 0) continue;
+    // 1. the allocation IS the check:  if ((p = malloc(n)) == NULL) { cleanup; return x; }   if (!(p = malloc(n)))   while ((p = ...) == NULL)
+    const prefix = c.code.slice(c.code.lastIndexOf("\n", m.index) + 1, m.index), tail = c.code.slice(close + 1, close + 60);
+    if (/\b(?:if|while|assert|unlikely|likely)\s*\([!(\s]*$/.test(prefix) || new RegExp("^\\s*\\)*\\s*(?:==|!=)\\s*" + NUL).test(tail)) continue;
+    // 2. otherwise look at everything after the statement up to the end of the enclosing block: is there a NULL check before the first real use?
+    const se = c.code.indexOf(";", close), from = se < 0 ? close : se + 1, o = c.br.encl[m.index], end = o >= 0 && c.br.pair[o] > 0 ? c.br.pair[o] : c.code.length;
+    const after = c.code.slice(from, Math.min(end, from + 4000));
+    const use = new RegExp("(?<![\\w)\\]]\\s*)(?<!sizeof\\s*\\(\\s*)\\*\\s*" + n + "\\b|(?<![\\w$.])" + n + "\\s*(?:->|\\[)|\\b(?:memcpy|memset|strcpy|strncpy|strcat|sprintf|snprintf|fread|fgets|read|memmove)\\s*\\(\\s*" + n + "\\b").exec(after);
     if (!use) continue;
-    const chk = new RegExp("!\\s*" + n + "\\b|\\b" + n + "\\s*(?:==|!=)\\s*(?:NULL|0|nullptr)|\\bif\\s*\\(\\s*" + n + "\\s*\\)|\\bassert\\s*\\(\\s*" + n + "\\b|(?:NULL|nullptr)\\s*(?:==|!=)\\s*" + n).exec(after);
-    if (chk && chk.index < use.index) continue;
+    const chk = new RegExp("!\\s*\\(?\\s*" + n + "\\b|(?<![\\w$.])" + n + "\\s*(?:==|!=)\\s*" + NUL + "|" + NUL + "\\s*(?:==|!=)\\s*" + n + "\\b|\\b(?:if|while)\\s*\\(\\s*" + n + "\\s*(?:\\)|&&|\\|\\|)|\\b(?:assert|ASSERT|CHECK|unlikely|likely|BUG_ON|g_return_if_fail|g_assert)\\w*\\s*\\(\\s*!?\\s*" + n + "\\b|(?<![\\w$.])" + n + "\\s*(?:\\?|&&|\\|\\|)|(?:&&|\\|\\|)\\s*" + n + "\\b").exec(after);
+    if (chk && chk.index <= use.index) continue;
     add({ id: "nullchk", cat: "broken", plain: "The result of malloc is used without checking for NULL. If memory runs out, this crashes.", fix: "Check `if (!p) { ... }` right after allocating." }, m.index, 3); k++;
   }
   const fr = /\bfree\s*\(\s*(\w+)\s*\)\s*;/g;
